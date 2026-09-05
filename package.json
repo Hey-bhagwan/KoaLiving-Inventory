@@ -3,13 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "bwip-js": "^4.11.4",
+    "html5-qrcode": "^2.3.8",
+    "lucide-react": "^1.41.0",
     "next": "16.3.4",
+    "prisma": "^5.22.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
@@ -22,5 +27,10 @@
     "eslint-config-next": "16.3.4",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "allowScripts": {
+    "prisma@5.22.0": true,
+    "@prisma/client@5.22.0": true,
+    "@prisma/engines@5.22.0": true
   }
 }
