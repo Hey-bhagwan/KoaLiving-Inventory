@@ -3,7 +3,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { ScanMode } from '@/types';
 import Toast, { useToast } from './Toast';
-import { Camera, CameraOff, Loader2 } from 'lucide-react';
+import { Camera, CameraOff, Loader2, CheckCircle2 } from 'lucide-react';
+
+const SUCCESS_PAUSE_SECONDS = 15; // full lockout after a confirmed scan
+const ERROR_COOLDOWN_SECONDS = 3; // short breather after a failed scan, so an
+// unmoving invalid barcode doesn't spam the API at ~10 decodes/sec
 
 // Web Audio beep helper
 function playBeep(success: boolean) {
@@ -22,30 +26,109 @@ function playBeep(success: boolean) {
   } catch (_) {}
 }
 
+// Vibration helper — supported on Android Chrome; silently a no-op on iOS
+// Safari and desktop browsers, so it's safe to call unconditionally.
+function vibrate(pattern: number | number[]) {
+  try {
+    if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+      navigator.vibrate(pattern);
+    }
+  } catch (_) {}
+}
+
+type ScannerHandle = {
+  stop: () => Promise<void>;
+  clear: () => void;
+  pause: (shouldPauseVideo?: boolean) => void;
+  resume: () => void;
+};
+
 export default function ScannerScreen() {
   const [mode, setMode] = useState<ScanMode>('INWARD');
   const [scanning, setScanning] = useState(false);
   const [loading, setLoading] = useState(false);
-  const { toasts, addToast, removeToast } = useToast();
-  const scannerRef = useRef<unknown>(null);
-  const cooldownRef = useRef(false);
-  const containerRef = useRef<HTMLDivElement>(null);
 
-  const stopScanner = useCallback(async () => {
+  // Lockout state (covers both the 15s success pause and the shorter error cooldown)
+  const [paused, setPaused] = useState(false);
+  const [pauseKind, setPauseKind] = useState<'success' | 'error' | null>(null);
+  const [pauseSecondsLeft, setPauseSecondsLeft] = useState(0);
+  const [pauseTotalSeconds, setPauseTotalSeconds] = useState(0);
+  const [lastSku, setLastSku] = useState<string | null>(null);
+
+  const { toasts, addToast, removeToast } = useToast();
+  const scannerRef = useRef<ScannerHandle | null>(null);
+  const pausedRef = useRef(false); // synchronous guard, read inside the decode callback
+  const containerRef = useRef<HTMLDivElement>(null);
+  const pauseIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pauseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearPauseTimers = useCallback(() => {
+    if (pauseIntervalRef.current) {
+      clearInterval(pauseIntervalRef.current);
+      pauseIntervalRef.current = null;
+    }
+    if (pauseTimeoutRef.current) {
+      clearTimeout(pauseTimeoutRef.current);
+      pauseTimeoutRef.current = null;
+    }
+  }, []);
+
+  const beginLockout = useCallback((seconds: number, kind: 'success' | 'error', sku?: string) => {
+    pausedRef.current = true;
+    setPaused(true);
+    setPauseKind(kind);
+    setPauseSecondsLeft(seconds);
+    setPauseTotalSeconds(seconds);
+    if (sku) setLastSku(sku.toUpperCase());
+
+    // Actually freeze the camera/decoder, not just ignore results — saves
+    // battery and avoids the library queuing up decode callbacks in the background.
     if (scannerRef.current) {
       try {
-        const html5QrCode = scannerRef.current as { stop: () => Promise<void>; clear: () => void };
-        await html5QrCode.stop();
-        html5QrCode.clear();
+        scannerRef.current.pause(true);
+      } catch (_) {}
+    }
+
+    clearPauseTimers();
+    pauseIntervalRef.current = setInterval(() => {
+      setPauseSecondsLeft((s) => (s > 0 ? s - 1 : 0));
+    }, 1000);
+
+    pauseTimeoutRef.current = setTimeout(() => {
+      clearPauseTimers();
+      pausedRef.current = false;
+      setPaused(false);
+      setPauseKind(null);
+      if (scannerRef.current) {
+        try {
+          scannerRef.current.resume();
+        } catch (_) {}
+      }
+    }, seconds * 1000);
+  }, [clearPauseTimers]);
+
+  const stopScanner = useCallback(async () => {
+    clearPauseTimers();
+    pausedRef.current = false;
+    setPaused(false);
+    setPauseKind(null);
+
+    if (scannerRef.current) {
+      try {
+        await scannerRef.current.stop();
+        scannerRef.current.clear();
       } catch (_) {}
       scannerRef.current = null;
     }
     setScanning(false);
-  }, []);
+  }, [clearPauseTimers]);
 
   const handleScan = useCallback(async (sku: string) => {
-    if (cooldownRef.current || loading) return;
-    cooldownRef.current = true;
+    // Hard guard: while locked out (mid-request, mid-15s pause, or mid-error-cooldown)
+    // every decode from the camera is ignored — this is what stops the same
+    // barcode (or any barcode) from being scanned again immediately.
+    if (pausedRef.current || loading) return;
+    pausedRef.current = true;
     setLoading(true);
 
     try {
@@ -58,23 +141,28 @@ export default function ScannerScreen() {
 
       if (!res.ok) {
         playBeep(false);
+        vibrate([80, 60, 80]); // short double-buzz for a failed scan
         addToast(data.error || 'Scan failed', 'error');
+        beginLockout(ERROR_COOLDOWN_SECONDS, 'error');
       } else {
         playBeep(true);
+        vibrate(200); // solid buzz confirming a successful scan
         const qty = data.product?.quantity ?? '?';
         addToast(
           `${mode === 'INWARD' ? '+1' : '-1'} ${sku.toUpperCase()} — Stock: ${qty}`,
           'success'
         );
+        beginLockout(SUCCESS_PAUSE_SECONDS, 'success', sku);
       }
     } catch {
       playBeep(false);
+      vibrate([80, 60, 80]);
       addToast('Network error. Try again.', 'error');
+      beginLockout(ERROR_COOLDOWN_SECONDS, 'error');
     } finally {
       setLoading(false);
-      setTimeout(() => { cooldownRef.current = false; }, 2000);
     }
-  }, [mode, loading, addToast]);
+  }, [mode, loading, addToast, beginLockout]);
 
   const startScanner = useCallback(async () => {
     const { Html5Qrcode } = await import('html5-qrcode');
@@ -82,11 +170,18 @@ export default function ScannerScreen() {
 
     if (scannerRef.current) await stopScanner();
 
-    const html5QrCode = new Html5Qrcode(scannerId);
+    const html5QrCode = new Html5Qrcode(scannerId) as unknown as ScannerHandle;
     scannerRef.current = html5QrCode;
 
     try {
-      await html5QrCode.start(
+      await (html5QrCode as unknown as {
+        start: (
+          cameraConfig: unknown,
+          config: unknown,
+          onSuccess: (decodedText: string) => void,
+          onError: undefined
+        ) => Promise<void>;
+      }).start(
         { facingMode: 'environment' },
         {
           fps: 10,
@@ -111,6 +206,8 @@ export default function ScannerScreen() {
       stopScanner();
     };
   }, [stopScanner]);
+
+  const pausePercent = pauseTotalSeconds > 0 ? Math.round((pauseSecondsLeft / pauseTotalSeconds) * 100) : 0;
 
   return (
     <div className="flex flex-col items-center gap-6 max-w-md mx-auto w-full">
@@ -155,20 +252,50 @@ export default function ScannerScreen() {
           {loading && <Loader2 size={16} className="animate-spin text-indigo-500" />}
         </div>
 
-        {/* html5-qrcode mounts here */}
-        <div
-          id="barcode-scanner-region"
-          ref={containerRef}
-          className="w-full mt-3"
-          style={{ minHeight: scanning ? '240px' : '0px' }}
-        />
+        <div className="relative mt-3">
+          {/* html5-qrcode mounts here */}
+          <div
+            id="barcode-scanner-region"
+            ref={containerRef}
+            className="w-full"
+            style={{ minHeight: scanning ? '240px' : '0px' }}
+          />
 
-        {!scanning && (
-          <div className="flex flex-col items-center gap-3 py-10 text-gray-400">
-            <CameraOff size={44} />
-            <p className="text-sm">Camera is off</p>
-          </div>
-        )}
+          {!scanning && (
+            <div className="flex flex-col items-center gap-3 py-10 text-gray-400">
+              <CameraOff size={44} />
+              <p className="text-sm">Camera is off</p>
+            </div>
+          )}
+
+          {/* Lockout overlay — shown for both the 15s success pause and the
+              short error cooldown, sitting on top of the frozen camera frame */}
+          {scanning && paused && (
+            <div
+              className={`absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center ${
+                pauseKind === 'success' ? 'bg-green-700/90' : 'bg-amber-700/90'
+              }`}
+            >
+              {pauseKind === 'success' ? (
+                <CheckCircle2 size={36} className="text-white" />
+              ) : (
+                <Loader2 size={36} className="text-white animate-spin" />
+              )}
+              <p className="text-white font-semibold text-sm">
+                {pauseKind === 'success' ? `Scanned ${lastSku}` : 'Move to a new barcode'}
+              </p>
+              <p className="text-white/80 text-xs">
+                {pauseKind === 'success' ? 'Next scan in' : 'Retrying in'} {pauseSecondsLeft}s
+              </p>
+              <div className="w-40 h-1.5 rounded-full bg-white/30 overflow-hidden mt-1">
+                <div
+                  className="h-full bg-white transition-all duration-1000 ease-linear"
+                  style={{ width: `${pausePercent}%` }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
 
         <div className="px-5 py-4 flex gap-3">
           {!scanning ? (
@@ -198,7 +325,7 @@ export default function ScannerScreen() {
           <li>Select Inward or Outward mode above.</li>
           <li>Tap <strong>Start Scanner</strong> and allow camera access.</li>
           <li>Hold the barcode label within the scan box.</li>
-          <li>A beep + toast will confirm each scan (2-second cooldown).</li>
+          <li>A beep + buzz + toast confirm each scan, then the scanner locks for {SUCCESS_PAUSE_SECONDS}s so the same barcode can&apos;t be counted twice.</li>
         </ol>
       </div>
     </div>
