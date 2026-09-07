@@ -107,6 +107,20 @@ export default function ScannerScreen() {
     }, seconds * 1000);
   }, [clearPauseTimers]);
 
+  // Lets the user manually end a lockout early (e.g. they're confident the
+  // next item really is different and don't want to wait out the full 15s).
+  const skipPause = useCallback(() => {
+    clearPauseTimers();
+    pausedRef.current = false;
+    setPaused(false);
+    setPauseKind(null);
+    if (scannerRef.current) {
+      try {
+        scannerRef.current.resume();
+      } catch (_) {}
+    }
+  }, [clearPauseTimers]);
+
   const stopScanner = useCallback(async () => {
     clearPauseTimers();
     pausedRef.current = false;
@@ -293,6 +307,12 @@ export default function ScannerScreen() {
                   style={{ width: `${pausePercent}%` }}
                 />
               </div>
+              <button
+                onClick={skipPause}
+                className="mt-2 text-xs font-semibold text-white/90 underline underline-offset-2 hover:text-white"
+              >
+                Skip wait — scan now
+              </button>
             </div>
           )}
         </div>
