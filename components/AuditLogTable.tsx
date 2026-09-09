@@ -1,7 +1,9 @@
 'use client';
 
+import { useState } from 'react';
 import { InventoryLog } from '@/types';
 import { RefreshCw, ArrowDownCircle, ArrowUpCircle } from 'lucide-react';
+import Pagination from '@/components/Pagination';
 
 interface AuditLogTableProps {
   logs: InventoryLog[];
@@ -11,10 +13,21 @@ interface AuditLogTableProps {
 
 export default function AuditLogTable({ logs: rawLogs, onRefresh, loading }: AuditLogTableProps) {
   const logs = Array.isArray(rawLogs) ? rawLogs : [];
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
+  const startIndex = (currentPage - 1) * pageSize;
+  const paginatedLogs = logs.slice(startIndex, startIndex + pageSize);
+
   return (
     <div className="bg-white rounded-2xl shadow overflow-hidden">
       <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-        <h2 className="text-lg font-semibold text-gray-800">Scan Audit Log</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-semibold text-gray-800">Scan Audit Log</h2>
+          <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full font-medium">
+            {logs.length} total events
+          </span>
+        </div>
         <button
           onClick={onRefresh}
           disabled={loading}
@@ -42,7 +55,7 @@ export default function AuditLogTable({ logs: rawLogs, onRefresh, loading }: Aud
                 </td>
               </tr>
             ) : (
-              logs.map((log) => (
+              paginatedLogs.map((log) => (
                 <tr key={log.id} className="hover:bg-gray-50 transition-colors">
                   <td className="px-6 py-3 font-mono font-medium text-gray-700">{log.sku}</td>
                   <td className="px-6 py-3">
@@ -67,6 +80,21 @@ export default function AuditLogTable({ logs: rawLogs, onRefresh, loading }: Aud
           </tbody>
         </table>
       </div>
+
+      {/* Pagination Bar */}
+      {logs.length > 0 && (
+        <Pagination
+          currentPage={currentPage}
+          totalItems={logs.length}
+          pageSize={pageSize}
+          onPageChange={(p) => setCurrentPage(p)}
+          onPageSizeChange={(size) => {
+            setPageSize(size);
+            setCurrentPage(1);
+          }}
+          pageSizeOptions={[10, 25, 50]}
+        />
+      )}
     </div>
   );
 }
